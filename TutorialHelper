@@ -1,0 +1,391 @@
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+
+local tutorialVisual = script.Parent.TutorialVisual
+local tutorialArrow = tutorialVisual.tutorialArrow
+
+local player = Players.LocalPlayer
+local playerGui = player.PlayerGui
+
+local defaultGUI = playerGui:WaitForChild("DefaultGui")
+local tutorialUI = defaultGUI:WaitForChild("TutorialUI")
+
+local instructionsText = tutorialUI.InstructionsText; instructionsText.Visible = false
+local tutorialHighlight = tutorialUI.highlightFrame; tutorialHighlight.Visible = false
+local highlightArrow = tutorialUI.arrowFrame; highlightArrow.Visible = false
+
+
+local module = {}
+
+-- Track active instances so there is never more than one active at a time
+local activeBeam = nil
+local activeHighlight = nil
+
+
+-- Track active UI arrow, animation thread, and the modified target frame's UIStroke
+local activeUiArrow = nil
+local arrowAnimCoroutine = nil
+local activeTargetStroke = nil
+local activeTargetFrame = nil
+
+------------------------------------------------------------------
+-- CLONE HIGHLIGHT ARROW, TWEEN TO TARGET, FLOAT, & ADD STROKE
+------------------------------------------------------------------
+function module.highlightUIArrow(targetFrame)
+	-- Clean up any existing arrow and stroke first (ensures only one exists)
+	module.clearUIArrow()
+
+	if not targetFrame or not targetFrame:IsA("GuiObject") then
+		warn("highlightUIArrow requires a valid GuiObject parameter.")
+		return nil
+	end
+
+	if not highlightArrow then
+		warn("highlightArrow template is missing from TutorialUI.")
+		return nil
+	end
+
+	-- 1. Add matching UIStroke to the target frame
+	activeTargetFrame = targetFrame
+	local stroke = Instance.new("UIStroke")
+	stroke.Name = "TutorialTargetStroke"
+	stroke.Thickness = 3
+	stroke.Color = highlightArrow.ImageColor3
+	stroke.Parent = targetFrame
+	activeTargetStroke = stroke
+
+	-- 2. Clone and position the arrow
+	local arrowClone = highlightArrow:Clone()
+	arrowClone.Visible = true
+	arrowClone.Parent = tutorialUI
+
+	local targetPos = targetFrame.AbsolutePosition
+	local targetSize = targetFrame.AbsoluteSize
+
+	local relativeX = targetPos.X + (targetSize.X / 2) - (arrowClone.AbsoluteSize.X / 2)
+	local targetY = targetPos.Y - arrowClone.AbsoluteSize.Y - 10
+
+	local startY = targetY - 15
+	arrowClone.Position = UDim2.new(0, relativeX, 0, startY)
+
+	-- Tween into initial position
+	local entranceInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local entranceTween = TweenService:Create(arrowClone, entranceInfo, {
+		Position = UDim2.new(0, relativeX, 0, targetY)
+	})
+	entranceTween:Play()
+
+	activeUiArrow = arrowClone
+
+	-- 3. Start looping up-and-down floating animation after entrance
+	arrowAnimCoroutine = task.spawn(function()
+		task.wait(0.3) -- wait for entrance tween to finish
+		while activeUiArrow == arrowClone do
+			local floatUpTween = TweenService:Create(arrowClone, TweenInfo.new(0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+				Position = UDim2.new(0, relativeX, 0, targetY - 8)
+			})
+			floatUpTween:Play()
+			task.wait(0.6)
+
+			if activeUiArrow ~= arrowClone then break end
+
+			local floatDownTween = TweenService:Create(arrowClone, TweenInfo.new(0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+				Position = UDim2.new(0, relativeX, 0, targetY + 2)
+			})
+			floatDownTween:Play()
+			task.wait(0.6)
+		end
+	end)
+
+	return arrowClone
+end
+
+------------------------------------------------------------------
+-- CLEAR THE UI ARROW, STOP ANIMATIONS, & REMOVE STROKE
+------------------------------------------------------------------
+function module.clearUIArrow()
+	if activeUiArrow and activeUiArrow.Parent then
+		activeUiArrow:Destroy()
+	end
+	activeUiArrow = nil
+
+	if activeTargetStroke and activeTargetStroke.Parent then
+		activeTargetStroke:Destroy()
+	end
+	activeTargetStroke = nil
+	activeTargetFrame = nil
+end
+
+------------------------------------------------------------------
+-- CONNECT ARROW BEAM BETWEEN TWO PARTS (REVERSED)
+------------------------------------------------------------------
+function module.ConnectArrowBeam(startPart, endPart)
+	module.ClearArrowBeam()
+
+	if not startPart or not endPart then
+		warn("ConnectArrowBeam requires both a start and end part.")
+		return
+	end
+
+	local beamClone = tutorialArrow:Clone()
+	beamClone.Parent = workspace.localStorage
+
+	local function getAttachment(part, attachmentName)
+		if part and part:IsA("BasePart") then
+			local att = part:FindFirstChild(attachmentName)
+			if not att then
+				att = Instance.new("Attachment")
+				att.Name = attachmentName
+				att.Parent = part
+			end
+			return att
+		end
+		return nil
+	end
+
+	local att0 = getAttachment(endPart, "BeamStartAttachment")
+	local att1 = getAttachment(startPart, "BeamEndAttachment")
+
+	local beam = beamClone:IsA("Beam") and beamClone or beamClone:FindFirstChildWhichIsA("Beam", true)
+
+	if beam and att0 and att1 then
+		beam.Attachment0 = att0
+		beam.Attachment1 = att1
+		beam.Enabled = true
+	else
+		warn("Failed to configure arrow beam: Missing valid Beam or Attachments.")
+	end
+
+	activeBeam = beamClone
+	return beamClone
+end
+
+------------------------------------------------------------------
+-- CLEAR ARROW BEAM
+------------------------------------------------------------------
+function module.ClearArrowBeam()
+	if activeBeam and activeBeam.Parent then
+		activeBeam:Destroy()
+	end
+	activeBeam = nil
+end
+
+------------------------------------------------------------------
+-- HIGHLIGHT 3D OBJECT (PART OR MODEL)
+------------------------------------------------------------------
+function module.HighlightObject(targetObject)
+	module.ClearHighlight()
+
+	if not targetObject or not (targetObject:IsA("BasePart") or targetObject:IsA("Model")) then
+		warn("HighlightObject requires a valid BasePart or Model parameter.")
+		return
+	end
+
+	local highlight = tutorialVisual.tutorialHighlight:Clone()
+	highlight.Adornee = targetObject
+	highlight.Parent = targetObject
+
+	activeHighlight = highlight
+	return highlight
+end
+
+------------------------------------------------------------------
+-- CLEAR HIGHLIGHT
+------------------------------------------------------------------
+function module.ClearHighlight()
+	if activeHighlight and activeHighlight.Parent then
+		activeHighlight:Destroy()
+	end
+	activeHighlight = nil
+end
+
+------------------------------------------------------------------
+-- CHANGE HIGHLIGHT UI (FOR UI ELEMENTS WITH TWEENING)
+------------------------------------------------------------------
+function module.changeHighlightUI(hoverFrame)
+	if not hoverFrame or not hoverFrame:IsA("GuiObject") then
+		warn("changeHighlightUI requires a valid GuiObject parameter.")
+		tutorialHighlight.Visible = false
+		return
+	end
+
+	tutorialHighlight.AnchorPoint = Vector2.new(0, 0)
+	tutorialHighlight.Visible = true
+
+	local targetPos = hoverFrame.AbsolutePosition
+	local targetSize = hoverFrame.AbsoluteSize
+
+	local parent = tutorialUI.highlightFrame.Parent
+	local parentPos = Vector2.new(0, 0)
+
+	if parent and parent:IsA("GuiObject") then
+		parentPos = parent.AbsolutePosition
+	end
+
+	local relativeX = targetPos.X
+	local relativeY = targetPos.Y + 30
+
+	local targetUDimPosition = UDim2.new(0, relativeX, 0, relativeY)
+	local targetUDimSize = UDim2.new(0, targetSize.X, 0, targetSize.Y)
+
+	local tweenInfo = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local tween = TweenService:Create(tutorialHighlight, tweenInfo, {
+		Position = targetUDimPosition,
+		Size = targetUDimSize
+	})
+
+	tween:Play()
+end
+
+function module.clearHighlightUI()
+	tutorialHighlight.Visible = false
+end
+
+------------------------------------------------------------------
+-- EDIT TUTORIAL TEXT
+------------------------------------------------------------------
+function module.editTutorialText(text)
+	instructionsText.Visible = true
+	instructionsText.dialogueTextLabel.Text = text
+end
+
+function module.clearTutorialText()
+	instructionsText.Visible = false
+end
+
+------------------------------------------------------------------
+-- CHECK IF PLAYER IS NEAR AN OBJECT (RUNS CALLBACK)
+------------------------------------------------------------------
+function module.OnPlayerNear(targetObject, maxDistance, callback)
+	if not targetObject or not (targetObject:IsA("BasePart") or targetObject:IsA("Model")) then
+		warn("OnPlayerNear requires a valid BasePart or Model target.")
+		return nil
+	end
+
+	maxDistance = maxDistance or 10
+	local isWatching = true
+
+	task.spawn(function()
+		while isWatching do
+			local playerRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			local targetPart = targetObject:IsA("Model") and (targetObject.PrimaryPart or targetObject:FindFirstChild("HumanoidRootPart") or targetObject:FindFirstChildWhichIsA("BasePart")) or targetObject
+
+			if playerRoot and targetPart then
+				local distance = (playerRoot.Position - targetPart.Position).Magnitude
+				if distance <= maxDistance then
+					isWatching = false
+					if callback then
+						callback()
+					end
+					break
+				end
+			end
+
+			task.wait(0.3)
+		end
+	end)
+
+	return function()
+		isWatching = false
+	end
+end
+
+function module.isPlayerNear(targetObject, maxDistance)
+	maxDistance = maxDistance or 10
+	local playerRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	local targetPart = targetObject:IsA("Model") and (targetObject.PrimaryPart or targetObject:FindFirstChild("HumanoidRootPart") or targetObject:FindFirstChildWhichIsA("BasePart")) or targetObject
+
+	if playerRoot and targetPart then
+		local distance = (playerRoot.Position - targetPart.Position).Magnitude
+		if distance <= maxDistance then
+			return true
+		end
+	end
+	return false
+end
+
+------------------------------------------------------------------
+-- GUIDE PLAYER TO NEAREST OBJECT FROM A LIST
+------------------------------------------------------------------
+function module.GuideToNearestObject(objectList, maxDistance, callback, filterFunc)
+	if not objectList or type(objectList) ~= "table" then
+		warn("GuideToNearestObject requires a valid table of objects.")
+		return nil
+	end
+
+	maxDistance = maxDistance or 10
+	local isWatching = true
+	local currentConnectedModel = nil
+
+	task.spawn(function()
+		while isWatching do
+			local playerRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+
+			if playerRoot then
+				local nearestObj = nil
+				local shortestDistance = math.huge
+
+				for _, obj in ipairs(objectList) do
+					local isValid = true
+					if filterFunc then
+						isValid = filterFunc(obj)
+					end
+
+					if isValid and (obj:IsA("Model") or obj:IsA("BasePart")) then
+						local targetPart = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")) or obj
+
+						if targetPart then
+							local distance = (playerRoot.Position - targetPart.Position).Magnitude
+
+							if distance <= maxDistance then
+								isWatching = false
+								module.ClearAll()
+								if callback then
+									callback(obj)
+								end
+								return
+							end
+
+							if distance < shortestDistance then
+								shortestDistance = distance
+								nearestObj = obj
+							end
+						end
+					end
+				end
+
+				if nearestObj and nearestObj ~= currentConnectedModel then
+					currentConnectedModel = nearestObj
+					local targetPart = nearestObj:IsA("Model") and (nearestObj.PrimaryPart or nearestObj:FindFirstChildWhichIsA("BasePart")) or nearestObj
+					if targetPart then
+						module.ConnectArrowBeam(playerRoot, targetPart)
+						module.HighlightObject(nearestObj)
+					end
+				elseif not nearestObj then
+					module.ClearAll()
+					currentConnectedModel = nil
+				end
+			end
+
+			task.wait(0.3)
+		end
+	end)
+
+	return function()
+		isWatching = false
+		module.ClearAll()
+	end
+end
+
+------------------------------------------------------------------
+-- CLEAR ALL TUTORIAL VISUALS
+------------------------------------------------------------------
+function module.ClearAll()
+	module.ClearArrowBeam()
+	module.ClearHighlight()
+	module.clearHighlightUI()
+	module.clearTutorialText()
+	module.clearUIArrow()
+end
+
+return module
