@@ -1,0 +1,245 @@
+local RS = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+
+local player = Players.LocalPlayer
+local playerGui = player.PlayerGui
+local defaultGUI = playerGui:WaitForChild("DefaultGui")
+local tutorialUI = defaultGUI:WaitForChild("TutorialUI")
+
+local continueButton = tutorialUI.InstructionsText.continueButton
+
+
+local tutorialRemotes = RS.Remotes.Tutorial
+local endTutorialRemote = tutorialRemotes.EndTutorial
+local startTutorialRemote = tutorialRemotes.StartTutorial
+
+local tutorialHelper = require(script.tutorialHelper)
+local tutorialsInfo = require(script.availableTutorials)
+
+local TutorialManager = {}
+TutorialManager.__index = TutorialManager
+
+local tutorialModulesFolder = script:WaitForChild("TutorialModules")
+
+TutorialManager.activeTutorialName = nil
+TutorialManager.steps = nil
+TutorialManager.currentIndex = 1
+TutorialManager.onCompleteCallback = nil
+
+function TutorialManager:hasCompleteEvent(eventName)
+	if not self.activeTutorialName or not self.steps then return end
+
+	local currentStep = self.steps[self.currentIndex]
+	if not currentStep then return end
+	
+	local matches = false
+	local eventField = currentStep.completionEvent
+
+	if type(eventField) == "table" then
+		-- Check if eventName is inside the list
+		for _, evt in ipairs(eventField) do
+			if evt == eventName then
+				matches = true
+				break
+			end
+		end
+	elseif eventField == eventName then
+		-- Fallback for single string
+		matches = true
+	end
+	
+	return matches
+end
+
+
+function TutorialManager:LoadStep(index)
+	-- If tutorial was destroyed/cancelled midway, stop loading steps
+	if not self.activeTutorialName then return end
+
+	if not self.steps or index > #self.steps then
+		self:CompleteTutorial()
+		return
+	end
+
+	self.currentIndex = index
+	local currentStep = self.steps[index]
+
+	if self:hasCompleteEvent("Continue") then
+		continueButton.Visible = true
+	else
+		continueButton.Visible = false
+	end
+
+	if currentStep.text then
+		tutorialHelper.editTutorialText(currentStep.text)
+	else
+		tutorialHelper.clearTutorialText()
+	end
+
+	-- Run the step's custom setup function if it exists
+	if type(currentStep.setup) == "function" then
+		task.spawn(currentStep.setup, self)
+	end
+end
+
+function TutorialManager:AdvanceStep(...)
+	if not self.activeTutorialName then return end
+
+	local currentStep = self.steps[self.currentIndex]
+
+	-- Run cleanup for the current step before moving on
+	if currentStep and type(currentStep.cleanup) == "function" then
+		pcall(currentStep.cleanup, self, ...)
+	end
+	tutorialHelper.ClearAll()
+
+	self.currentIndex = self.currentIndex + 1
+	print("Starting step " .. self.currentIndex) -- Moved here so it's accurate
+
+	if self.currentIndex > #self.steps then
+		self:CompleteTutorial()
+		return
+	end
+
+	self:LoadStep(self.currentIndex)
+end
+
+------------------------------------------------------------------
+-- PUBLIC API
+------------------------------------------------------------------
+
+-- Starts a tutorial by looking up its ModuleScript inside `TutorialModules` directly
+function TutorialManager:StartTutorial(tutorialName, onCompleteCallback)
+	-- Guard clause: Check if a tutorial is already running
+	if self.activeTutorialName ~= nil then
+		warn("Cannot start tutorial '" .. tutorialName .. "'; another tutorial is already active.")
+		return false
+	end
+
+	if not tutorialsInfo.isValidTutorial(tutorialName) then
+		warn("Tutorial not found: " .. tostring(tutorialName))
+		return false
+	end
+
+	-- Find the module script inside the folder
+	local moduleScript = tutorialModulesFolder:FindFirstChild(tutorialName)
+	if not moduleScript or not moduleScript:IsA("ModuleScript") then
+		warn("Tutorial module not found or is invalid: " .. tostring(tutorialName))
+		return false
+	end
+
+	-- Require the module to get its steps table
+	local success, steps = pcall(function()
+		return require(moduleScript)
+	end)
+
+	if not success or type(steps) ~= "table" then
+		warn("Failed to load steps from tutorial module: " .. tostring(tutorialName))
+		return false
+	end
+
+	warn("STARTING TUTORIAL ", tutorialName)
+
+	startTutorialRemote:FireServer(tutorialName)
+	-- Set internal state directly
+	self.activeTutorialName = tutorialName
+	self.steps = steps
+	self.currentIndex = 1
+	self.onCompleteCallback = onCompleteCallback
+
+	-- Kick off the first step
+	self:LoadStep(1)
+
+	return true
+end
+
+-- Function for inputting progress lines / events (Recursive to handle consecutive matches)
+-- Function for inputting progress lines / events (Supports single strings or lists)
+function TutorialManager:InputProgress(eventName, ...)
+	if not self.activeTutorialName or not self.steps then return end
+
+	-- Use a while loop instead of recursion for better performance and safety
+	while self:hasCompleteEvent(eventName) do
+		self:AdvanceStep(...)
+
+		-- Manual "Continue" events should stop after one step so the player has to click again
+		if eventName == "Continue" then
+			break
+		end
+	end
+end
+
+-- Check if a specific action/button is blocked by the current step
+function TutorialManager:CanPerformAction(actionName)
+	if not self.activeTutorialName or not self.steps then return true end
+
+	local currentStep = self.steps[self.currentIndex]
+	if not currentStep then return true end
+
+	-- If blockedActions is nil or empty, allow the action immediately
+	if not currentStep.blockedActions or #currentStep.blockedActions == 0 then
+		return true
+	end
+
+	local canPerform = true
+
+	for _, blockedName in ipairs(currentStep.blockedActions) do
+		if blockedName == actionName then
+			canPerform = false
+			break
+		end
+	end
+
+	if not canPerform then
+		print("Action blocked by tutorial step: " .. actionName)
+	end
+
+	return canPerform
+end
+
+function TutorialManager:CompleteTutorial()
+	print("Tutorial Completed!")
+
+	--endTutorialRemote:FireServer(self.activeTutorialName) TODO remove comment for testing
+
+	tutorialHelper.ClearAll()
+
+	if self.onCompleteCallback then
+		task.spawn(self.onCompleteCallback)
+	end
+
+	-- Clear state
+	self.activeTutorialName = nil
+	self.steps = nil
+	self.currentIndex = 1
+	self.onCompleteCallback = nil
+end
+
+-- Forcefully cancels/destroys the current tutorial without finishing or saving
+function TutorialManager:DestroyTutorial()
+	if not self.activeTutorialName then return end
+
+	print("Tutorial destroyed/cancelled: " .. tostring(self.activeTutorialName))
+
+	-- Optionally run cleanup on the current active step before wiping state
+	local currentStep = self.steps and self.steps[self.currentIndex]
+	if currentStep and type(currentStep.cleanup) == "function" then
+		pcall(currentStep.cleanup, self)
+	end
+
+	-- Clear state completely without triggering completion remote or callbacks
+	self.activeTutorialName = nil
+	self.steps = nil
+	self.currentIndex = 1
+	self.onCompleteCallback = nil
+end
+
+function TutorialManager:IsRunning()
+	return self.activeTutorialName ~= nil
+end
+
+continueButton.Activated:Connect(function()
+	TutorialManager:InputProgress("Continue")
+end)
+
+return TutorialManager
