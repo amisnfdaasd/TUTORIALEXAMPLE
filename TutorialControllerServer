@@ -1,0 +1,87 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+
+local CONSTANTS = require(ReplicatedStorage.Player.Constants)
+local gameConfig = require(ReplicatedStorage.Info.GameConfig)
+local serverQuestManager = require(ServerScriptService.Modules.ServerQuestManager)
+local dataManager = require(ServerScriptService.Data.DataManager)
+local availableTutorials = require(ReplicatedStorage.Player.Scripts.TutorialController.availableTutorials)
+local ServerQuestManager = require(ServerScriptService.Modules.ServerQuestManager)
+
+local REMOTES_FOLDER = ReplicatedStorage.Remotes
+local TUTORIAL_REMOTES_FOLDER = REMOTES_FOLDER.Tutorial
+
+
+local GAME_INFO = ReplicatedStorage.GameInfo
+
+local TutorialServer = {}
+TutorialServer.__index = TutorialServer
+
+function TutorialServer.new(gameManager)
+	local self = setmetatable({}, TutorialServer)
+	
+	self.gameManager = gameManager
+	
+	self:initialize()
+	return self
+end
+
+
+
+local function getTutorialValue(player)
+	local infoFolder = player:FindFirstChild("Info")
+	if not infoFolder then
+		warn("No info folder found for player:", player.Name)
+		return nil
+	end
+	
+	local tutorialValue = infoFolder:FindFirstChild("SelectedTutorial")
+	if not tutorialValue then
+		warn("No tutorial value found in info folder for player:", player.Name)
+		return nil
+	end
+	
+	return tutorialValue
+	
+end
+
+function TutorialServer:initialize()
+	TUTORIAL_REMOTES_FOLDER.EndTutorial.OnServerEvent:Connect(function(player, tutorialName)
+		if availableTutorials:isValidTutorial(tutorialName) then
+			warn("Invalid tutorial name:", tutorialName)
+			return
+		end
+		local tutorialValue = getTutorialValue(player)
+		if not tutorialValue then
+			warn("No tutorial value found for player:", player.Name)
+			return
+		end
+
+		tutorialValue.Value = "None"
+		ServerQuestManager.IncrementQuest(player, "CompleteTutorial", 1)
+		warn("COMPLETED TUTORIAL ", tutorialName)
+		dataManager.setTutorialData(player, tutorialName)
+	end)
+	TUTORIAL_REMOTES_FOLDER.StartTutorial.OnServerEvent:Connect(function(player, tutorialName)
+		if availableTutorials:isValidTutorial(tutorialName) then
+			warn("Invalid tutorial name:", tutorialName)
+			return
+		end
+		
+		local tutorialValue = getTutorialValue(player)
+		if not tutorialValue then
+			warn("No tutorial value found for player:", player.Name)
+			return
+		end
+		
+		tutorialValue.Value = tutorialName
+		
+		
+	end)
+
+end
+
+
+return TutorialServer
