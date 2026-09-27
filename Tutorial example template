@@ -1,0 +1,441 @@
+local npcFolder = workspace:WaitForChild("NPCS")
+local RS = game:GetService("ReplicatedStorage")
+local player = game.Players.LocalPlayer
+
+local playerGUI = player:WaitForChild("PlayerGui")
+local defaultGUI = playerGUI:WaitForChild("DefaultGui")
+
+local tutorialController = require(script.Parent.Parent)
+local tutorialHelper = require(script.Parent.Parent.tutorialHelper)
+local applianceTaskIdentifier = require(RS.Info.ApplianceTaskIdentifer)
+local orderManager = require(RS.Player.Scripts.DefaultGuiController.OrderManager)
+local cameraController = require(RS.Player.Utility.CameraController)
+-- Track active state / loop control flag for cleanup
+local isRunning = false
+local cancelGuide=  nil
+local selectedAppliance = nil
+-- Return the array table directly so require(moduleScript) reads it as 'steps'
+
+local cameraParts = workspace:WaitForChild("CutsceneParts").initialTutorial
+local camera = workspace.CurrentCamera
+
+
+local steps = {
+	{
+		id = "intro_get_near",
+		text = "Welcome to the Monster Bar! Head over near a customer.",
+
+		setup = function(session)
+			isRunning = true
+				while isRunning do
+					local targetNPC = nil
+
+					-- Scan the NPC folder for an eligible customer
+					for _, npc in ipairs(npcFolder:GetChildren()) do
+						if npc:IsA("Model") and npc:HasTag("Customer") then
+							local ownerAttr = npc:GetAttribute("owner")
+							if ownerAttr == nil or ownerAttr == false then
+								targetNPC = npc
+								break
+							end
+						end
+					end
+
+					if targetNPC and isRunning then
+						local rootPart = targetNPC:FindFirstChild("HumanoidRootPart") or targetNPC.PrimaryPart
+						local playerRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+
+						if rootPart and playerRoot then
+							-- Connect arrow beam from player to customer
+							tutorialHelper.ConnectArrowBeam(playerRoot, rootPart)
+
+							-- Check distance (e.g., within 10 studs)
+							local distance = (playerRoot.Position - rootPart.Position).Magnitude
+							if distance <= 10 then
+								isRunning = false
+								tutorialHelper.ClearArrowBeam()
+								-- Proceed to the next step automatically when close enough
+								tutorialController:AdvanceStep()
+								break
+							end
+						end
+					else
+						tutorialHelper.ClearArrowBeam()
+					end
+
+					task.wait(0.2)
+				end
+		end,
+
+		completionEvent = "OrderAcquired", -- Handled programmatically via proceedstep()
+
+		blockedActions = {
+			"DrinkSelectionTask"
+		},
+
+		cleanup = function(session)
+			isRunning = false
+		end
+	},
+	{
+		id = "intro_interact_order",
+		text = "Walk up to the customer and interact to get an order.",
+
+		setup = function(session)
+
+		end,
+
+		completionEvent = "OrderAcquired",
+
+		blockedActions = {
+			"DrinkSelectionTask"
+		},
+
+		cleanup = function(session)
+			isRunning = false
+		end
+	},
+	{
+		id = "inspectOrder",
+		text = "This is where the customer's drink orders are shown! you can hold 3 orders at once and cycle through them using X or Z",
+
+		setup = function(session)
+			local highlightFrame = defaultGUI.OrderListFrame.orderDisplayFrame
+			tutorialHelper.changeHighlightUI(highlightFrame)
+
+			print("Setting up Step 4: Shaker is ready.")
+		end,
+
+		completionEvent = {"Continue"},
+
+		blockedActions = {
+			"DrinkSelectionTask"
+		},
+
+		cleanup = function(session)
+		end
+	},
+	{
+		id = "startDrink",
+		text = "All drink orders begin at the drink selection station. Walk over to the station and interact to start making a drink.",
+
+		setup = function(session)
+			local applianceModelList = applianceTaskIdentifier.getListOfObject("DrinkSelection")
+
+			-- Guide player to any operable drink station within 8 studs, then advance step automatically
+			cancelGuide = tutorialHelper.GuideToNearestObject(
+				applianceModelList, 
+				8, 
+				function(matchedObject)
+					tutorialController:AdvanceStep()
+				end, 
+				function(obj)
+					-- Optional filter: Only target models that are operable
+					return obj:IsA("Model") and (obj:GetAttribute("Operable") == nil or obj:GetAttribute("Operable") == true)
+				end
+			)
+		end,
+
+		completionEvent = "DrinkSelectionTask",
+
+		blockedActions = {
+			"DrinkSelection"
+		},
+
+		cleanup = function(session)
+			print(selectedAppliance)
+			print("Cleaning up Step 3.")
+			if cancelGuide then
+				cancelGuide()
+				cancelGuide = nil
+			end
+		end
+	},
+	{
+		id = "selectSlot",
+		text = "To start a drink, select an empty slot on your hotbar. The selected hotbar will be the item that will be modified.",
+
+		setup = function(session)
+			local highlightFrame = playerGUI.inventoryDrinks.mainFrame
+			tutorialHelper.changeHighlightUI(highlightFrame)
+			
+			print("Setting up Step 4: Shaker is ready.")
+		end,
+
+		completionEvent = {"selectSlot", "DrinkSelectionTask"},
+
+		blockedActions = {
+		},
+
+		cleanup = function(session)
+
+		end
+	},
+	{
+		id = "startAppliance",
+		text = "Interact with the drink shelf.",
+
+		setup = function(session)
+
+		end,
+
+		completionEvent = {"DrinkSelectionTask"},
+
+		blockedActions = {
+		},
+
+		cleanup = function(session, model)
+			selectedAppliance = model
+			print(selectedAppliance)
+
+		end
+	},
+	{
+		id = "pickGlass",
+		text = "select the correct ordered glass.",
+
+		setup = function(session)
+			local glassName = orderManager.getCurrentGlass()
+			if not glassName then return end
+			print(glassName)
+			local glassModel = selectedAppliance.GlassesStorage:WaitForChild(glassName, 3)
+			local orderUI = orderManager.getCurrentOrderUIFrame()
+			print(orderUI)
+			
+			if orderUI then
+				local headerFrame = orderUI:WaitForChild("headerFrame")
+				if headerFrame and headerFrame:FindFirstChild("glassImage") then
+					tutorialHelper.highlightUIArrow(headerFrame.glassImage)
+
+				end
+			end
+			
+			if glassModel then
+				tutorialHelper.HighlightObject(glassModel)
+			end
+			
+			print(glassName)
+
+
+		end,
+
+		completionEvent = {"glassSelected"},
+
+		blockedActions = {
+			"EndDrinkSelectionTask",
+			"cancelMinigame"
+		},
+
+		cleanup = function(session)
+		end
+	},
+	{
+		id = "pickDrink",
+		text = "You can see the ordered drink here on the header. Select the correct drink from the selection.",
+
+		setup = function(session)
+			local drinkName = orderManager.getCurrentOrderedDrink()
+			if not drinkName then return end
+			local drinkModel = selectedAppliance.DrinkCabinet:WaitForChild(drinkName, 3)
+			local orderUI = orderManager.getCurrentOrderUIFrame()
+			print(orderUI)
+
+			if orderUI then
+				local headerFrame = orderUI:WaitForChild("headerFrame")
+				if headerFrame and headerFrame:FindFirstChild("glassImage") then
+					tutorialHelper.highlightUIArrow(headerFrame.recipeImageButton)
+
+				end
+			end
+
+			if drinkModel then
+				tutorialHelper.HighlightObject(drinkModel)
+			end
+
+			print(drinkModel)
+
+
+		end,
+
+		completionEvent = {"drinkSelected"},
+
+		blockedActions = {
+			"EndDrinkSelectionTask",
+			"cancelMinigame"
+
+		},
+
+		cleanup = function(session)
+		end
+	},
+	{
+		text = "pour till 100%",
+
+		setup = function(session)
+
+
+
+		end,
+
+		completionEvent = {"DrinkFull", "EndDrinkSelectionTask"},
+
+		blockedActions = {
+			"EndDrinkSelectionTask",
+			"cancelMinigame"
+
+		},
+
+		cleanup = function(session)
+		end
+	},
+	{
+
+		setup = function(session)
+
+		end,
+
+		completionEvent = {"EndDrinkSelectionTask"},
+
+		blockedActions = {
+			"cancelMinigame",
+		},
+
+		cleanup = function(session)
+		end
+	},
+	{
+		id = "serve_drink_to_customer",
+		text = "Go back to the customer and serve your drink!",
+
+		setup = function(session)
+			local customerModel = orderManager.getCurrentCustomerModel()
+			local playerRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+
+			if customerModel and playerRoot then
+				local targetPart = customerModel.PrimaryPart or customerModel:FindFirstChild("HumanoidRootPart") or customerModel:FindFirstChildWhichIsA("BasePart")
+
+				if targetPart then
+					-- Connect an arrow beam from the player to the customer
+					tutorialHelper.ConnectArrowBeam(playerRoot, targetPart)
+
+					-- Highlight the customer model in 3D
+					tutorialHelper.HighlightObject(customerModel)
+				end
+			end
+		end,
+
+		completionEvent = {"ServeDrink"}, -- Adjust this to whatever event your game triggers when a drink is successfully served
+
+		blockedActions = {
+		},
+
+		cleanup = function(session)
+			tutorialHelper.ClearAll()
+		end
+	},
+	{
+		id = "serve_drink_to_customer",
+		text = "This is your restaurant display. It shows your stars, budget and tax!",
+
+		setup = function(session)
+			camera.CameraType = Enum.CameraType.Scriptable
+			camera.CFrame = cameraParts.tabletCamera.CFrame
+		end,
+
+		completionEvent = {"Continue"}, -- Adjust this to whatever event your game triggers when a drink is successfully served
+
+		blockedActions = {
+		},
+
+		cleanup = function(session)
+			cameraController.resetCamera()
+		end
+	},
+	{
+		id = "serve_drink_to_customer",
+		text = "Interact with this tablet to access your restuarant upgrades and restock!",
+
+		setup = function(session)
+			camera.CameraType = Enum.CameraType.Scriptable
+			camera.CFrame = cameraParts.tabletCamera.CFrame
+		end,
+
+		completionEvent = {"Continue"}, -- Adjust this to whatever event your game triggers when a drink is successfully served
+
+		blockedActions = {
+		},
+
+		cleanup = function(session)
+			cameraController.resetCamera()
+		end
+	},
+	{
+		id = "serve_drink_to_customer",
+		text = "Your coins multiplier is the extra money from your drink that is added to the restaurant funding",
+
+		setup = function(session)
+			camera.CameraType = Enum.CameraType.Scriptable
+			camera.CFrame = cameraParts.tabletCamera.CFrame
+			
+			local boostGUI = defaultGUI:FindFirstChild("BoostsGui")
+			if boostGUI then
+				local coinsMultiplier = boostGUI:FindFirstChild("CoinsBoost")
+				if coinsMultiplier then
+					tutorialHelper.highlightUIArrow(coinsMultiplier)
+				else
+					tutorialController:AdvanceStep()
+				end
+			else
+				tutorialController:AdvanceStep()
+			end
+			
+		end,
+
+		completionEvent = {"Continue"}, -- Adjust this to whatever event your game triggers when a drink is successfully served
+
+		blockedActions = {
+		},
+
+		cleanup = function(session)
+			cameraController.resetCamera()
+		end
+	},
+	{
+		id = "serve_drink_to_customer",
+		text = "Your Tip multiplier is the percent of paid money that you get personally. Increase these stats with your restaurant and personal upgrades!",
+
+		setup = function(session)
+			camera.CameraType = Enum.CameraType.Scriptable
+			camera.CFrame = cameraParts.tabletCamera.CFrame
+
+			local boostGUI = defaultGUI:FindFirstChild("BoostsGui")
+			if boostGUI then
+				local TipMultiplier = boostGUI:FindFirstChild("TipBoost")
+				if TipMultiplier then
+					tutorialHelper.highlightUIArrow(TipMultiplier)
+				else
+					tutorialController:AdvanceStep()
+				end
+			else
+				tutorialController:AdvanceStep()
+			end
+
+		end,
+
+		completionEvent = {"Continue"}, -- Adjust this to whatever event your game triggers when a drink is successfully served
+
+		blockedActions = {
+		},
+
+		cleanup = function(session)
+			cameraController.resetCamera()
+		end
+	},
+	
+
+
+	
+
+}
+
+return steps
